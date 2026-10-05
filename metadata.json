@@ -1,0 +1,6 @@
+{
+  "name": "RecallFlow",
+  "description": "Turn spoken work into lasting context and accountable action. A privacy-aware, voice-first meeting and knowledge-memory copilot powered by Omi, Qdrant, and Lyzr.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
