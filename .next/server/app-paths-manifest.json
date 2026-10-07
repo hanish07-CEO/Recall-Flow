@@ -1,0 +1,12 @@
+{
+  "/api/action-items/route": "app/api/action-items/route.js",
+  "/api/memories/route": "app/api/memories/route.js",
+  "/api/omi/webhook/route": "app/api/omi/webhook/route.js",
+  "/api/system/reset/route": "app/api/system/reset/route.js",
+  "/_not-found/page": "app/_not-found/page.js",
+  "/api/search/route": "app/api/search/route.js",
+  "/api/system/status/route": "app/api/system/status/route.js",
+  "/dashboard/page": "app/dashboard/page.js",
+  "/login/page": "app/login/page.js",
+  "/page": "app/page.js"
+}
