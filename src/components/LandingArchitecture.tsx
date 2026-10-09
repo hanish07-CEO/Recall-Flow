@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState } from 'react';
-import { Shield, Database, ListChecks, GitCompare, Sparkles, ArrowRight, CheckCircle2, Clock } from 'lucide-react';
+import { Shield, Database, ListChecks, GitCompare, Sparkles, ArrowRight, CheckCircle2, Clock, Cpu } from 'lucide-react';
 
 export const LandingArchitecture: React.FC = () => {
   const [activeAgentIndex, setActiveAgentIndex] = useState<number>(0);
