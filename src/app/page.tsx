@@ -4,7 +4,7 @@ import { LandingHero } from '@/components/LandingHero';
 import { LandingFeatures } from '@/components/LandingFeatures';
 import { LandingArchitecture } from '@/components/LandingArchitecture';
 import { LandingPrivacy } from '@/components/LandingPrivacy';
-import { LandingPricing } from '@/components/LandingPricing';
+
 import { LandingFooter } from '@/components/LandingFooter';
 
 export default function LandingPage() {
@@ -16,7 +16,7 @@ export default function LandingPage() {
         <LandingFeatures />
         <LandingArchitecture />
         <LandingPrivacy />
-        <LandingPricing />
+
       </main>
       <LandingFooter />
     </div>
