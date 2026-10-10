@@ -53,7 +53,7 @@ export const MemoryExplorer: React.FC<MemoryExplorerProps> = ({
   };
 
   return (
-    <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 shadow-xl relative overflow-hidden">
+    <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 shadow-xl relative overflow-y-auto scrollbar-transparent">
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4 pb-3 border-b border-slate-800">
         <div className="flex items-center gap-2">

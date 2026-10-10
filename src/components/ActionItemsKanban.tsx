@@ -30,7 +30,7 @@ export const ActionItemsKanban: React.FC<ActionItemsKanbanProps> = ({
   };
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 overflow-y-auto scrollbar-transparent">
       {/* Top Metric Cards Row */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <div className="p-5 rounded-2xl bg-slate-900/80 border border-slate-800 backdrop-blur-xl">
