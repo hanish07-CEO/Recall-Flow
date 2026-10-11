@@ -4,6 +4,114 @@ import { MemoryRecord, PrivacyScope, RetentionPolicy } from '../../models/memory
 import { ActionItemRecord } from '../../models/actionItem';
 import { AgentStepTrace, AgentWorkflowTrace, EvidenceCitation, EvidenceQAResponse } from '../../models/agent';
 
+// Every pattern is global so that ALL occurrences are redacted, not just the first.
+const SECRET_PATTERNS: RegExp[] = [
+  /sk_live_[\w-]+/gi,
+  /\bpassword\s*[:=]\s*\S+/gi,
+  /\bAKIA[0-9A-Z]{16}\b/g,
+  /\bgh[pousr]_\w{36,}\b/g,
+];
+
+function scrubSecrets(text: string): string {
+  return SECRET_PATTERNS.reduce((acc, re) => acc.replace(re, '[REDACTED_SECRET]'), text);
+}
+
+const NON_NAME_WORDS = new Set([
+  'We', 'They', 'This', 'That', 'It', 'He', 'She', 'You', 'There', 'Who', 'What',
+  'Everyone', 'Someone', 'Nobody', 'I',
+]);
+
+const WEEKDAYS = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+const ISO_DAY = /^\d{4}-\d{2}-\d{2}$/;
+
+function addDays(base: Date, days: number): string {
+  return new Date(base.getTime() + days * 86_400_000).toISOString().slice(0, 10);
+}
+
+/** Resolve "Friday", "tomorrow", "2026-10-09" relative to the meeting date. Returns undefined if unclear. */
+export function resolveDueDate(raw: string | undefined, meetingDate: string): string | undefined {
+  if (!raw) return undefined;
+  const text = raw.trim().toLowerCase();
+  const base = new Date(`${meetingDate.slice(0, 10)}T00:00:00Z`);
+  if (Number.isNaN(base.getTime())) return undefined;
+
+  if (ISO_DAY.test(text)) return text;
+  if (/^(today|eod|end of day)$/.test(text)) return addDays(base, 0);
+  if (text === 'tomorrow') return addDays(base, 1);
+
+  const idx = WEEKDAYS.findIndex((d) => new RegExp(`\\b${d}\\b`).test(text));
+  if (idx === -1) return undefined;
+  let delta = (idx - base.getUTCDay() + 7) % 7;
+  if (/\bnext\b/.test(text)) delta += 7;
+  return addDays(base, delta);
+}
+
+function formatDay(iso: string): string {
+  return new Date(`${iso}T00:00:00Z`).toLocaleDateString('en-US', {
+    weekday: 'long',
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric',
+    timeZone: 'UTC',
+  });
+}
+
+interface Commitment {
+  owner: string;
+  task: string;
+  due?: string;
+  snippet: string;
+}
+
+function extractCommitments(text: string): Commitment[] {
+  const re = /\b([A-Z][a-z]+)\s+will\s+(.+?)(?:\s+by\s+([A-Za-z0-9 ,-]+?))?(?=[.!?;]|$)/g;
+  const out: Commitment[] = [];
+  for (const m of text.matchAll(re)) {
+    if (NON_NAME_WORDS.has(m[1])) continue;
+    const idx = m.index ?? 0;
+    const before = text.slice(0, idx);
+    const start = Math.max(before.lastIndexOf('. '), before.lastIndexOf('! '), before.lastIndexOf('? ')) + 1;
+    const end = idx + m[0].length;
+    out.push({
+      owner: m[1],
+      task: m[2].trim().replace(/^./, (c) => c.toUpperCase()),
+      due: m[3]?.trim(),
+      snippet: text.slice(start, end + 1).trim(),
+    });
+    if (out.length >= 5) break;
+  }
+  return out;
+}
+
+function tokens(text: string): Set<string> {
+  return new Set(text.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter((t) => t.length > 2));
+}
+
+function tasksSimilar(a: string, b: string): boolean {
+  const ta = tokens(a);
+  const tb = tokens(b);
+  if (ta.size === 0 || tb.size === 0) return false;
+  let overlap = 0;
+  for (const t of ta) if (tb.has(t)) overlap++;
+  return overlap / Math.min(ta.size, tb.size) >= 0.5;
+}
+
+const TAG_RULES: Array<[RegExp, string]> = [
+  [/api review/i, 'api-review'],
+  [/cach/i, 'caching'],
+  [/benchmark/i, 'benchmark'],
+  [/qdrant/i, 'qdrant'],
+  [/qdrant[\s\S]*cost|cost[\s\S]*qdrant/i, 'qdrant-cost'],
+  [/deadline|\bdue\b|\bby (mon|tues|wednes|thurs|fri)day\b/i, 'deadline'],
+];
+
+function deriveTags(text: string, owners: string[]): string[] {
+  const tags = new Set<string>(['voice-transcript']);
+  for (const [re, tag] of TAG_RULES) if (re.test(text)) tags.add(tag);
+  for (const o of owners) tags.add(o.toLowerCase());
+  return [...tags];
+}
+
 export class LyzrDemoWorkflow implements ILyzrWorkflow {
   public readonly name = 'Lyzr Multi-Agent Demo Engine';
   public readonly isDemo = true;
@@ -19,18 +127,20 @@ export class LyzrDemoWorkflow implements ILyzrWorkflow {
     const privacyScope: PrivacyScope = (input.privacyScope as PrivacyScope) || 'team';
     const retentionPolicy: RetentionPolicy = (input.retentionPolicy as RetentionPolicy) || '30d';
     const text = input.transcript.trim();
+    const meetingDate = input.meetingDate || new Date().toISOString().slice(0, 10);
+    // One id shared by the memory record and the action items that point back to it.
+    const memoryId = `mem-${Date.now()}-${input.sessionId}`;
 
     // ---------------------------------------------------------
     // Agent 1: Privacy Enforcement Agent
     // ---------------------------------------------------------
     const pStart = Date.now();
-    let sanitizedText = text;
     let privacyStatus: WorkflowRunResult['privacyStatus'] = 'approved';
 
-    // Scrub API keys or secrets
-    const keyMatch = text.match(/(sk_live_[a-zA-Z0-9_-]+|password\s*[:=]\s*\S+)/i);
-    if (keyMatch) {
-      sanitizedText = text.replace(keyMatch[0], '[REDACTED_SECRET]');
+    // Scrub every API key or secret before anything is stored or analysed further
+    const sanitizedText = scrubSecrets(text);
+    const secretsScrubbed = sanitizedText !== text;
+    if (secretsScrubbed) {
       privacyStatus = 'scrubbed';
     }
 
@@ -51,7 +161,7 @@ export class LyzrDemoWorkflow implements ILyzrWorkflow {
       inputSummary: `Scope: "${privacyScope}", Retention: "${retentionPolicy}", Length: ${text.length} chars`,
       thoughtProcess: isDoNotRetain
         ? `Transcript marked with "do_not_retain" privacy policy. Ephemeral processing permitted for live agents, but long-term Qdrant persistence will be blocked.`
-        : `Verified payload integrity. Privacy scope is "${privacyScope}". Scrubbed secret tokens: ${keyMatch ? 'Yes (redacted)' : 'None detected'}. Memory approved for persistence.`,
+        : `Verified payload integrity. Privacy scope is "${privacyScope}". Scrubbed secret tokens: ${secretsScrubbed ? 'Yes (redacted)' : 'None detected'}. Memory approved for persistence.`,
       outputSummary: `Status: ${privacyStatus}. Storage approved: ${!isDoNotRetain}. Sanitized text ready.`,
     });
 
@@ -61,20 +171,22 @@ export class LyzrDemoWorkflow implements ILyzrWorkflow {
     const rStart = Date.now();
     const retrievedContexts: MemoryRecord[] = [];
 
-    // Check if transcript references historical topics (e.g. Qdrant cost issue, last Tuesday, caching)
-    const searchTerms = [];
-    if (/qdrant|cost|tuesday/i.test(sanitizedText)) searchTerms.push('qdrant cost issue last tuesday');
-    if (/caching|benchmark/i.test(sanitizedText)) searchTerms.push('caching benchmark sprint');
+    // What this event may read is decided by the server from the owner's role. The payload's own
+    // privacyScope never widens it, and zero-retention records are never readable.
+    const readableScopes = ((input.retrievalScopes as PrivacyScope[] | undefined) ?? ['public', 'team']).filter(
+      (s) => s !== 'do_not_retain'
+    );
 
+    const searchTerms = [sanitizedText];
     for (const term of searchTerms) {
       const results = await repository.searchMemories(
         term,
         {
           userId: input.userId,
           workspaceId: input.workspaceId,
-          privacyScopes: [privacyScope, 'public', 'team'],
+          privacyScopes: readableScopes,
         },
-        2
+        3
       );
       for (const r of results) {
         if (!retrievedContexts.some((c) => c.memoryId === r.memory.memoryId)) {
@@ -92,8 +204,8 @@ export class LyzrDemoWorkflow implements ILyzrWorkflow {
       startedAt: new Date(rStart).toISOString(),
       completedAt: new Date().toISOString(),
       durationMs: Date.now() - rStart,
-      inputSummary: `Queries: [${searchTerms.join(', ')}]`,
-      thoughtProcess: `Extracted semantic lookup keys from transcript: [${searchTerms.join(', ')}]. Located ${retrievedContexts.length} relevant historical memories in Qdrant collections. Verified caller permissions for workspace "${input.workspaceId}".`,
+      inputSummary: `Semantic lookup over the sanitized transcript (${sanitizedText.length} chars), scopes: [${readableScopes.join(', ')}]`,
+      thoughtProcess: `Queried the memory store with the sanitized transcript. Located ${retrievedContexts.length} relevant historical memories. Retrieval was limited to scopes [${readableScopes.join(', ')}] in workspace "${input.workspaceId}", independent of this event's own privacy scope.`,
       outputSummary: `Retrieved ${retrievedContexts.length} historical memories: ${retrievedContexts.map((c) => c.sessionId).join(', ') || 'No prior context'}`,
     });
 
@@ -103,45 +215,30 @@ export class LyzrDemoWorkflow implements ILyzrWorkflow {
     const aStart = Date.now();
     const actionItems: ActionItemRecord[] = [];
 
-    // Analyze target scenario: "During today’s API review, Priya will benchmark caching by Friday..."
-    const isPriyaCaching = /priya/i.test(sanitizedText) && /benchmark/i.test(sanitizedText) && /caching/i.test(sanitizedText);
-
-    if (isPriyaCaching) {
+    // Heuristic extraction: "<Name> will <task> [by <deadline>]". Deadlines resolve relative to the meeting date.
+    const meetingDay = new Date(`${meetingDate.slice(0, 10)}T00:00:00Z`);
+    extractCommitments(sanitizedText).forEach((c, i) => {
+      const resolved = resolveDueDate(c.due, meetingDate);
+      const daysAway = resolved
+        ? Math.round((new Date(`${resolved}T00:00:00Z`).getTime() - meetingDay.getTime()) / 86_400_000)
+        : undefined;
+      const urgent = /\b(urgent|asap|critical|immediately)\b/i.test(c.snippet);
+      const now = new Date().toISOString();
       actionItems.push({
-        id: `act-${Date.now()}-priya-caching`,
-        memoryId: `mem-${input.sessionId}`,
+        id: `act-${Date.now()}-${i}`,
+        memoryId,
         userId: input.userId,
         workspaceId: input.workspaceId,
-        task: 'Benchmark caching',
-        owner: 'Priya',
-        dueDate: '2026-10-09', // Friday, October 9, 2026
-        priority: 'high',
+        task: c.task,
+        owner: c.owner,
+        dueDate: resolved ?? c.due ?? 'Unscheduled',
+        priority: urgent ? 'urgent' : daysAway !== undefined && daysAway <= 3 ? 'high' : 'medium',
         status: 'open',
-        contextSnippet: 'During today’s API review, Priya will benchmark caching by Friday.',
-        previousDeadline: '2026-10-08',
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
+        contextSnippet: c.snippet,
+        createdAt: now,
+        updatedAt: now,
       });
-    } else {
-      // General heuristic extraction for arbitrary transcripts
-      const matchAssignee = sanitizedText.match(/([A-Z][a-z]+)\s+will\s+([^.]+?)(?:\s+by\s+([A-Za-z0-9\s]+))?(?:\.|$)/i);
-      if (matchAssignee) {
-        actionItems.push({
-          id: `act-${Date.now()}-generic`,
-          memoryId: `mem-${input.sessionId}`,
-          userId: input.userId,
-          workspaceId: input.workspaceId,
-          task: matchAssignee[2].trim(),
-          owner: matchAssignee[1].trim(),
-          dueDate: matchAssignee[3] ? matchAssignee[3].trim() : '2026-10-09',
-          priority: 'medium',
-          status: 'open',
-          contextSnippet: matchAssignee[0],
-          createdAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString(),
-        });
-      }
-    }
+    });
 
     steps.push({
       id: `step-action-${Date.now()}`,
@@ -154,7 +251,7 @@ export class LyzrDemoWorkflow implements ILyzrWorkflow {
       durationMs: Date.now() - aStart,
       inputSummary: `Analyzed transcript text for commitments and deadlines`,
       thoughtProcess: actionItems.length > 0
-        ? `Identified explicit commitment. Task: "${actionItems[0].task}", Assignee: "${actionItems[0].owner}", Due Date: "${actionItems[0].dueDate}" (Friday), Priority: "${actionItems[0].priority}".`
+        ? `Identified explicit commitment. Task: "${actionItems[0].task}", Assignee: "${actionItems[0].owner}", Due Date: "${actionItems[0].dueDate}", Priority: "${actionItems[0].priority}".`
         : `No explicit action item commitments detected in the provided transcript segment.`,
       outputSummary: `Extracted ${actionItems.length} action item(s): ${actionItems.map((a) => `${a.task} (${a.owner})`).join(', ') || 'None'}`,
     });
@@ -164,6 +261,9 @@ export class LyzrDemoWorkflow implements ILyzrWorkflow {
     // ---------------------------------------------------------
     const cStart = Date.now();
     let changeDetected: WorkflowRunResult['changeDetected'];
+    // Progress already recorded on an existing task. The extraction result keeps the freshly
+    // extracted status ("open"); only the persisted record keeps the user's progress.
+    const preservedStatus = new Map<string, ActionItemRecord['status']>();
 
     if (actionItems.length > 0) {
       const existingItems = await repository.listActionItems({
@@ -172,33 +272,39 @@ export class LyzrDemoWorkflow implements ILyzrWorkflow {
       });
 
       for (const newItem of actionItems) {
+        // Same owner + similar task = the same commitment: update it instead of duplicating it.
         const existing = existingItems.find(
-          (ex) =>
-            ex.owner.toLowerCase() === newItem.owner.toLowerCase() &&
-            (ex.task.toLowerCase().includes('caching') || newItem.task.toLowerCase().includes(ex.task.toLowerCase()))
+          (ex) => ex.owner.toLowerCase() === newItem.owner.toLowerCase() && tasksSimilar(ex.task, newItem.task)
         );
+        if (!existing) continue;
 
-        if (existing && existing.dueDate !== newItem.dueDate) {
-          changeDetected = {
-            actionItemId: existing.id,
-            field: 'dueDate',
-            oldValue: 'Thursday, October 8, 2026',
-            newValue: 'Friday, October 9, 2026',
-            reason: 'Extended by Priya during API review',
-          };
+        newItem.id = existing.id;
+        preservedStatus.set(existing.id, existing.status);
+        newItem.createdAt = existing.createdAt;
 
-          // Attach change details to the action item
-          newItem.id = existing.id; // Update existing record
+        // Only compare real dates; free-text deadlines can't be diffed reliably.
+        if (
+          existing.dueDate !== newItem.dueDate &&
+          ISO_DAY.test(existing.dueDate) &&
+          ISO_DAY.test(newItem.dueDate)
+        ) {
+          const reason = `Deadline updated in session ${input.sessionId}`;
           newItem.previousDeadline = existing.dueDate;
           newItem.changeDetected = {
             field: 'dueDate',
             oldValue: existing.dueDate,
             newValue: newItem.dueDate,
-            reason: 'Extended by Priya during API review',
+            reason,
             detectedAt: new Date().toISOString(),
             sourceSessionId: input.sessionId,
           };
-          break;
+          changeDetected ??= {
+            actionItemId: existing.id,
+            field: 'dueDate',
+            oldValue: formatDay(existing.dueDate),
+            newValue: formatDay(newItem.dueDate),
+            reason,
+          };
         }
       }
     }
@@ -214,7 +320,7 @@ export class LyzrDemoWorkflow implements ILyzrWorkflow {
       durationMs: Date.now() - cStart,
       inputSummary: `Comparing ${actionItems.length} new items against repository history`,
       thoughtProcess: changeDetected
-        ? `Delta detected! Priya's caching benchmark was previously committed for ${changeDetected.oldValue}. In today's meeting, the deadline shifted to ${changeDetected.newValue}. Flagging change delta.`
+        ? `Delta detected! A matching commitment was previously due ${changeDetected.oldValue}. In this session the deadline shifted to ${changeDetected.newValue}. Flagging change delta.`
         : `No conflicting historical commitments or deadline changes detected.`,
       outputSummary: changeDetected
         ? `Change detected: ${changeDetected.field} shifted from "${changeDetected.oldValue}" -> "${changeDetected.newValue}"`
@@ -229,26 +335,27 @@ export class LyzrDemoWorkflow implements ILyzrWorkflow {
 
     if (!isDoNotRetain) {
       memoryRecord = {
-        memoryId: `mem-${Date.now()}-${input.sessionId}`,
+        memoryId,
         userId: input.userId,
         workspaceId: input.workspaceId,
         sessionId: input.sessionId,
         transcriptText: sanitizedText,
         createdAt: new Date().toISOString(),
-        meetingDate: input.meetingDate || '2026-10-06',
-        tags: ['api-review', 'caching', 'priya', 'qdrant-cost', 'voice-transcript'],
+        meetingDate,
+        tags: deriveTags(sanitizedText, actionItems.map((a) => a.owner)),
         privacyScope,
         retentionPolicy,
         storageState: 'active',
-        source: 'omi_simulator',
+        source: input.source === 'omi_simulator' ? 'omi_simulator' : 'omi_webhook',
         actionItemId: actionItems[0]?.id,
+        metadata: input.eventId ? { eventId: input.eventId } : undefined,
       };
 
       // Persist to Qdrant
       await repository.upsertMemory(memoryRecord);
       if (actionItems.length > 0) {
         for (const item of actionItems) {
-          await repository.upsertActionItem(item);
+          await repository.upsertActionItem({ ...item, status: preservedStatus.get(item.id) ?? item.status });
         }
       }
     }
@@ -272,7 +379,7 @@ export class LyzrDemoWorkflow implements ILyzrWorkflow {
     const totalDurationMs = Date.now() - startTime;
     const trace: AgentWorkflowTrace = {
       traceId,
-      triggerEventId: `evt-${Date.now()}`,
+      triggerEventId: input.eventId ?? `evt-${Date.now()}`,
       timestamp: new Date().toISOString(),
       mode: 'demo_simulator',
       status: 'success',
