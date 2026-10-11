@@ -3,6 +3,7 @@
 import React, { useState } from 'react';
 import { Search, Sparkles, Shield, Calendar, Radio, CheckCircle, ChevronDown, ChevronRight, HelpCircle } from 'lucide-react';
 import { EvidenceQAResponse } from '@/lib/models/agent';
+import { apiFetch } from '@/lib/client/api';
 
 interface EvidenceQASearchProps {
   currentUserId: string;
@@ -31,19 +32,12 @@ export const EvidenceQASearch: React.FC<EvidenceQASearchProps> = ({
     setIsLoading(true);
     setResult(null);
 
-    const isAdmin = currentUserId === 'user-admin';
-    const allowedScopes = isAdmin ? ['team', 'public', 'confidential'] : ['team', 'public'];
-
     try {
-      const res = await fetch('/api/search', {
+      // Identity and visible scopes are resolved on the server; the body only carries the question.
+      const res = await apiFetch(currentUserId, '/api/search', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          query: q,
-          userId: currentUserId,
-          workspaceId: 'workspace-default',
-          allowedScopes,
-        }),
+        body: JSON.stringify({ query: q }),
       });
 
       const json = await res.json();

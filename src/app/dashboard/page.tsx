@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { DashboardNavbar } from '@/components/DashboardNavbar';
 import { OmiSimulator } from '@/components/OmiSimulator';
 import { AgentWorkflowGraph } from '@/components/AgentWorkflowGraph';
@@ -10,7 +10,9 @@ import { EvidenceQASearch } from '@/components/EvidenceQASearch';
 import { ActionItemRecord } from '@/lib/models/actionItem';
 import { MemoryRecord } from '@/lib/models/memory';
 import { AgentWorkflowTrace } from '@/lib/models/agent';
-import { Sparkles } from 'lucide-react';
+import { Sparkles, AlertTriangle } from 'lucide-react';
+import { apiFetch } from '@/lib/client/api';
+import type { IngestionClientResponse } from '@/lib/services/ingestionService';
 
 export default function DashboardPage() {
   const [currentUserId, setCurrentUserId] = useState<string>('user-default');
@@ -20,6 +22,8 @@ export default function DashboardPage() {
   const [isResetting, setIsResetting] = useState<boolean>(false);
   const [activeTab, setActiveTab] = useState<'stream' | 'actions' | 'agents' | 'copilot'>('stream');
   const [notification, setNotification] = useState<{ message: string; targetTab: 'actions' | 'agents' } | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const requestSeq = useRef(0);
 
   // Sync initial role from query or localStorage on mount
   useEffect(() => {
@@ -35,44 +39,53 @@ export default function DashboardPage() {
     }
   }, []);
 
-  // Load data
-  const fetchData = async () => {
+  // Load data. Only the latest request may write state, so switching persona quickly can't show stale data.
+  const fetchData = useCallback(async () => {
+    const seq = ++requestSeq.current;
     try {
-      const aiRes = await fetch(`/api/action-items?userId=${currentUserId}`);
-      const aiData = await aiRes.json();
-      if (aiData.success) {
-        setActionItems(aiData.actionItems);
-      }
+      const [aiRes, memRes] = await Promise.all([
+        apiFetch(currentUserId, '/api/action-items'),
+        apiFetch(currentUserId, '/api/memories'),
+      ]);
+      const [aiData, memData] = await Promise.all([aiRes.json(), memRes.json()]);
+      if (seq !== requestSeq.current) return;
 
-      const scopes = currentUserId === 'user-admin' ? 'public,team,confidential' : 'public,team';
-      const memRes = await fetch(`/api/memories?scopes=${scopes}`);
-      const memData = await memRes.json();
-      if (memData.success) {
-        setMemories(memData.memories);
+      if (!aiRes.ok || !aiData.success || !memRes.ok || !memData.success) {
+        throw new Error(aiData.error || memData.error || 'The server rejected the request');
       }
+      setActionItems(aiData.actionItems);
+      setMemories(memData.memories);
+      setLoadError(null);
     } catch (err) {
-      console.error('Failed to load initial data:', err);
+      if (seq !== requestSeq.current) return;
+      setLoadError(err instanceof Error ? err.message : 'Failed to load data');
     }
-  };
+  }, [currentUserId]);
 
   useEffect(() => {
     fetchData();
-  }, [currentUserId]);
+  }, [fetchData]);
 
-  const handleIngestionSuccess = (data: any) => {
+  const handleIngestionSuccess = (data: IngestionClientResponse) => {
     if (data.workflowRun?.trace) {
       setWorkflowTrace(data.workflowRun.trace);
     }
     fetchData();
 
-    if (data.result?.changeDetected) {
+    const { result } = data;
+    if (result.status === 'purged_do_not_retain') {
       setNotification({
-        message: '⚡ Timeline change detected! Priya’s deadline shifted to Friday, Oct 9, 2026.',
+        message: 'Processed transiently under Do Not Retain. Nothing was stored in memory or the action list.',
+        targetTab: 'agents',
+      });
+    } else if (result.changeDetected) {
+      setNotification({
+        message: '⚡ Timeline change detected! A deadline moved. Review the delta in Action Items.',
         targetTab: 'actions',
       });
     } else {
       setNotification({
-        message: 'Transcript processed successfully! All 5 Lyzr agents completed execution.',
+        message: `Transcript processed. ${result.actionItemsExtracted} action item(s) extracted by the Lyzr agents.`,
         targetTab: 'agents',
       });
     }
@@ -80,45 +93,45 @@ export default function DashboardPage() {
 
   const handleActionItemStatusChange = async (id: string, status: ActionItemRecord['status']) => {
     try {
-      const res = await fetch('/api/action-items', {
+      const res = await apiFetch(currentUserId, '/api/action-items', {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ id, status }),
       });
       const data = await res.json();
-      if (data.success) {
-        setActionItems((prev) =>
-          prev.map((item) => (item.id === id ? { ...item, status } : item))
-        );
-      }
+      if (!res.ok || !data.success) throw new Error(data.error || 'Update failed');
+      setActionItems((prev) =>
+        prev.map((item) => (item.id === id ? { ...item, status } : item))
+      );
     } catch (err) {
-      console.error('Failed to update status:', err);
+      setLoadError(err instanceof Error ? err.message : 'Failed to update status');
     }
   };
 
   const handleDeleteMemory = async (memoryId: string) => {
     try {
-      const res = await fetch(`/api/memories?memoryId=${memoryId}`, {
+      const res = await apiFetch(currentUserId, `/api/memories?memoryId=${encodeURIComponent(memoryId)}`, {
         method: 'DELETE',
       });
       const data = await res.json();
-      if (data.success) {
-        setMemories((prev) => prev.filter((m) => m.memoryId !== memoryId));
-      }
+      if (!res.ok || !data.success) throw new Error(data.error || 'Delete failed');
+      setMemories((prev) => prev.filter((m) => m.memoryId !== memoryId));
     } catch (err) {
-      console.error('Failed to delete memory:', err);
+      setLoadError(err instanceof Error ? err.message : 'Failed to delete memory');
     }
   };
 
   const handleResetSeed = async () => {
     setIsResetting(true);
     try {
-      await fetch('/api/system/reset', { method: 'POST' });
+      const res = await apiFetch(currentUserId, '/api/system/reset', { method: 'POST' });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || 'Reset failed');
       await fetchData();
       setWorkflowTrace(null);
       setNotification(null);
     } catch (err) {
-      console.error('Failed to reset:', err);
+      setLoadError(err instanceof Error ? err.message : 'Failed to reset');
     } finally {
       setIsResetting(false);
     }
@@ -139,9 +152,24 @@ export default function DashboardPage() {
 
       {/* Spacious Main Workspace Canvas */}
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-12 space-y-12">
+        {loadError && (
+          <div role="alert" className="p-4 rounded-2xl bg-rose-950/50 border border-rose-800 text-sm text-rose-200 flex items-center justify-between gap-4">
+            <div className="flex items-center gap-3">
+              <AlertTriangle aria-hidden="true" className="w-5 h-5 text-rose-400 shrink-0" />
+              <span>{loadError}</span>
+            </div>
+            <button
+              onClick={() => { setLoadError(null); fetchData(); }}
+              className="px-3 py-1.5 rounded-xl bg-rose-900 hover:bg-rose-800 text-rose-100 font-semibold text-xs transition shrink-0"
+            >
+              Retry
+            </button>
+          </div>
+        )}
+
         {/* Active Notification Banner */}
         {notification && (
-          <div className="p-4 rounded-2xl bg-sky-950/60 border border-sky-800 text-sm text-sky-200 flex flex-col sm:flex-row sm:items-center justify-between gap-4 shadow-xl shadow-sky-950/30 animate-fadeIn">
+          <div role="status" className="p-4 rounded-2xl bg-sky-950/60 border border-sky-800 text-sm text-sky-200 flex flex-col sm:flex-row sm:items-center justify-between gap-4 shadow-xl shadow-sky-950/30 animate-fadeIn">
             <div className="flex items-center gap-3">
               <Sparkles className="w-5 h-5 text-sky-400 shrink-0" />
               <span>{notification.message}</span>

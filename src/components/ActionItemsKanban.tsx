@@ -168,7 +168,15 @@ export const ActionItemsKanban: React.FC<ActionItemsKanbanProps> = ({
                       <Calendar className="w-4 h-4 text-indigo-400" />
                       <span>Due Date:</span>
                       <strong className="text-slate-200 font-semibold">
-                        {item.dueDate === '2026-10-09' ? 'Friday, October 9, 2026' : item.dueDate}
+                        {/^\d{4}-\d{2}-\d{2}$/.test(item.dueDate)
+                          ? new Date(`${item.dueDate}T00:00:00Z`).toLocaleDateString('en-US', {
+                              weekday: 'long',
+                              year: 'numeric',
+                              month: 'long',
+                              day: 'numeric',
+                              timeZone: 'UTC',
+                            })
+                          : item.dueDate}
                       </strong>
                     </div>
 

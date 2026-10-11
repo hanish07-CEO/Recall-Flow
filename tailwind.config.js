@@ -9,6 +9,7 @@ module.exports = {
   theme: {
     extend: {
       colors: {
+        slate: { 750: '#273244' },
         brand: {
           50: '#f0f7ff',
           100: '#e0effe',

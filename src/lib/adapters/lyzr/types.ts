@@ -8,9 +8,16 @@ export interface WorkflowRunInput {
   userId: string;
   workspaceId: string;
   sessionId: string;
+  eventId?: string;
+  source?: 'omi_device' | 'omi_simulator' | 'omi_app';
   meetingDate?: string;
   privacyScope?: string;
   retentionPolicy?: string;
+  /**
+   * Scopes the context-retrieval agent may read while processing this event. Derived by the server
+   * from the owner's role; it must never be widened by the payload's own privacyScope.
+   */
+  retrievalScopes?: string[];
 }
 
 export interface WorkflowRunResult {

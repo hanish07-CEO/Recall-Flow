@@ -8,6 +8,8 @@ const __dirname = path.dirname(__filename);
 const nextConfig = {
   reactStrictMode: true,
   outputFileTracingRoot: __dirname,
+  // Ensure lucide-react icons are transpiled correctly for the server runtime
+  transpilePackages: ['lucide-react'],
 };
 
 export default nextConfig;

@@ -52,11 +52,10 @@ describe('Privacy and Retention Enforcement', () => {
     expect(result.status).toBe('scrubbed');
 
     // Check memory text in repository
-    if (workflowRun.memoryRecord) {
-      const stored = await repo.getMemory(workflowRun.memoryRecord.memoryId);
-      expect(stored?.transcriptText).toContain('[REDACTED_SECRET]');
-      expect(stored?.transcriptText).not.toContain('sk_live_9876543210abcdef');
-    }
+    expect(workflowRun.memoryRecord).toBeDefined();
+    const stored = await repo.getMemory(workflowRun.memoryRecord!.memoryId);
+    expect(stored?.transcriptText).toContain('[REDACTED_SECRET]');
+    expect(stored?.transcriptText).not.toContain('sk_live_9876543210abcdef');
   });
 
   it('blocks unauthorized access to confidential records during QA search', async () => {

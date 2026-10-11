@@ -2,6 +2,9 @@ import { MemoryRecord, PrivacyScope } from '../../models/memory';
 import { ActionItemRecord } from '../../models/actionItem';
 import { IQdrantRepository, MemoryFilterOptions, SemanticSearchResult } from './types';
 import { SEED_MEMORIES, SEED_ACTION_ITEMS } from '../../mockData/seedMemories';
+import { isExpired } from './retention';
+
+const SEED_MEMORY_IDS = new Set(SEED_MEMORIES.map((m) => m.memoryId));
 
 export class QdrantDemoAdapter implements IQdrantRepository {
   public readonly name = 'Qdrant In-Memory Demo Adapter';
@@ -105,9 +108,12 @@ export class QdrantDemoAdapter implements IQdrantRepository {
   }
 
   public async purgeRetentionExpired(): Promise<number> {
+    const now = Date.now();
     let count = 0;
     for (const [id, mem] of this.memories.entries()) {
-      if (mem.retentionPolicy === 'ephemeral_session') {
+      // Baseline seed fixtures are exempt so the demo scenario never decays with the calendar.
+      if (SEED_MEMORY_IDS.has(id)) continue;
+      if (isExpired(mem, now)) {
         this.memories.delete(id);
         count++;
       }
